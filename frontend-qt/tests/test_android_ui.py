@@ -114,14 +114,21 @@ class AndroidTargetTests(unittest.TestCase):
         w._toggle_target()
         w._toggle_target()   # android
         self.app.processEvents()
+        # LauncherSwitch.setChecked is silent (only a click emits toggled), so the handlers run
+        # the way the window's own tests drive them (ParityWindowTests's bc_switch precedent)
         w.android_fps_switch.setChecked(True)
+        w._on_android_fps(True)
         self.assertTrue(m.android_fps60)
         self.assertIs(m.settings_value('androidFps60', False), True)
         w.android_touch_switch.setChecked(True)
+        w._on_android_touch(True)
         self.assertTrue(m.android_touch)
+        self.assertIs(m.settings_value('androidTouch', False), True)
         w.android_mtr_switch.setChecked(True)
+        w._on_android_mtr(True)
         self.assertTrue(m.android_mt_replay)
         w.android_install_switch.setChecked(True)
+        w._on_android_install(True)
         self.assertTrue(m.android_install)
 
         # the language combo's data is porter's -l value

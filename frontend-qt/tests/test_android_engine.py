@@ -37,12 +37,12 @@ class IsEngineTreeTests(unittest.TestCase):
 class InstalledTests(unittest.TestCase):
     def test_chosen_wins_when_valid(self) -> None:
         with tempfile.TemporaryDirectory() as d:
-            aeng._make_tree(Path(d, 'chosen'))
+            _make_tree(Path(d, 'chosen'))
             self.assertEqual(aeng.installed(d, str(Path(d, 'chosen'))), str(Path(d, 'chosen')))
 
     def test_default_clone_used_when_choice_invalid(self) -> None:
         with tempfile.TemporaryDirectory() as d:
-            aeng._make_tree(Path(d, 'android-engine'))
+            _make_tree(Path(d, 'android-engine'))
             self.assertEqual(aeng.installed(d, str(Path(d, 'gone'))), str(Path(d, 'android-engine')))
             self.assertEqual(aeng.installed(d, ''), str(Path(d, 'android-engine')))
 
@@ -53,7 +53,7 @@ class InstalledTests(unittest.TestCase):
     def test_needs_fetch_follows_installed(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             self.assertTrue(aeng.needs_fetch(d, ''))
-            aeng._make_tree(Path(d, 'android-engine'))
+            _make_tree(Path(d, 'android-engine'))
             self.assertFalse(aeng.needs_fetch(d, ''))
 
 
