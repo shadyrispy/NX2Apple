@@ -165,10 +165,14 @@ class AndroidTargetTests(unittest.TestCase):
             m = Model()
             m.target = 'android'
             m._check_deps()
-        self.assertEqual([d.id for d in m.deps], ['android_engine'])
-        self.assertFalse(m.deps[0].ok)
-        self.assertEqual(m.deps[0].detail, '/state/android-engine')
-        self.assertTrue(m.deps[0].required)
+        ids = [d.id for d in m.deps]
+        self.assertEqual(ids[-1], 'android_engine')
+        self.assertNotIn('xcode', ids)
+        self.assertNotIn('metal', ids)
+        self.assertNotIn('tool:spirv-cross', ids)
+        self.assertFalse(m.deps[-1].ok)
+        self.assertEqual(m.deps[-1].detail, '/state/android-engine')
+        self.assertTrue(m.deps[-1].required)
 
 
 if __name__ == '__main__':

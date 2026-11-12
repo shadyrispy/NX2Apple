@@ -1190,13 +1190,13 @@ class MainWindow(QMainWindow):
         grp.add_divider()
 
         self._android_switch_row('android.fps60', 'android.fps60.note', self.m.android_fps60,
-                                 self._on_android_fps, grp)
+                                 self._on_android_fps, grp, 'android_fps_switch')
         self._android_switch_row('android.touch', 'android.touch.note', self.m.android_touch,
-                                 self._on_android_touch, grp)
+                                 self._on_android_touch, grp, 'android_touch_switch')
         self._android_switch_row('android.mtReplay', 'android.mtReplay.note', self.m.android_mt_replay,
-                                 self._on_android_mtr, grp)
+                                 self._on_android_mtr, grp, 'android_mtr_switch')
         self._android_switch_row('android.install', 'android.install.note', self.m.android_install,
-                                 self._on_android_install, grp)
+                                 self._on_android_install, grp, 'android_install_switch')
 
         # Device row: what adb sees (porter devices --json)
         r_dev = QWidget()
@@ -1226,7 +1226,8 @@ class MainWindow(QMainWindow):
 
         return grp
 
-    def _android_switch_row(self, title_key: str, note_key: str, checked: bool, slot, grp: CardGroup) -> None:
+    def _android_switch_row(self, title_key: str, note_key: str, checked: bool, slot,
+                            grp: CardGroup, switch_attr: str) -> None:
         r = QWidget()
         lay = QHBoxLayout(r)
         lay.setContentsMargins(18, 12, 18, 12)
@@ -1245,6 +1246,7 @@ class MainWindow(QMainWindow):
         sw = LauncherSwitch(checked)
         sw.toggled.connect(slot)
         lay.addWidget(sw)
+        setattr(self, switch_attr, sw)
         grp.add_row(r)
         grp.add_divider()
         self._android_switch_labels.append((title, note, title_key, note_key))
@@ -2833,7 +2835,7 @@ class MainWindow(QMainWindow):
             title, btn, hint = t('build.mac'), t('target.mac'), t('target.hint.mac')
         elif tgt == 'android':
             title, btn = t('build.android'), t('target.android')
-            hint = self._android_status_text() or t('android.hint')
+            hint = self._android_status_text() or t('target.hint.android')
         else:
             title, btn, hint = t('build.ios'), t('target.ios'), t('target.hint.ios')
         self.target_title_lbl.setText(title)

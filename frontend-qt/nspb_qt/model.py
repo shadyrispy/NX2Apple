@@ -813,14 +813,14 @@ class Model(QObject):
         doc, _code = aport.run_json(eng, py, aport.doctor_args(), timeout=180)
         rows = doc if isinstance(doc, list) else (doc.get('rows') if isinstance(doc, dict) else None)
         by_name = {r.get('name'): r for r in rows if isinstance(r, dict)} if rows else {}
-        for name, dep_id, key, only in (('Android NDK', 'android_ndk', 'dep.androidNdk', 'ndk'),
-                                        ('.NET SDK', 'android_dotnet', 'dep.dotnet', 'dotnet'),
-                                        ('adb', 'android_adb', 'dep.androidAdb', 'adb')):
+        for name, dep_id, key, hint_key, only in (('Android NDK', 'android_ndk', 'dep.androidNdk', 'dep.androidNdk.hint', 'ndk'),
+                                                  ('.NET SDK', 'android_dotnet', 'dep.dotnet', 'dep.dotnet.hint', 'dotnet'),
+                                                  ('adb', 'android_adb', 'dep.androidAdb', 'dep.androidAdb.hint', 'adb')):
             r = by_name.get(name)
             if r is None:
                 continue
             ok = bool(r.get('ok'))
-            deps.append(Dep(dep_id, key, key + '.hint',
+            deps.append(Dep(dep_id, key, hint_key,
                             DepState.OK if ok else DepState.MISSING,
                             str(r.get('detail') or '') if ok else '',
                             install=[] if ok else [py, '-m', 'porter', *aport.tools_args(download=True, only=only)],

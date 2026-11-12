@@ -120,16 +120,22 @@ class ArgvTests(unittest.TestCase):
         self.assertEqual(aport.inspect_args('/games'), ['inspect', '/games', '--json'])
 
     def test_run_json_parses_one_document(self) -> None:
-        doc, code = aport.run_json(str(Path(__file__).parent), sys.executable,
-                                   ['-c', 'import json; print(json.dumps({"ok": 1}))'])
-        self.assertEqual((doc, code), ({'ok': 1}, 0))
-        doc, code = aport.run_json(str(Path(__file__).parent), sys.executable,
-                                   ['-c', 'print("not json")'])
-        self.assertIsNone(doc)
-        doc, code = aport.run_json(str(Path(__file__).parent), sys.executable,
-                                   ['-c', 'raise SystemExit(2)'])
-        self.assertIsNone(doc)
-        self.assertEqual(code, 2)
+        # a fake porter: run_json runs `python -m porter` with cwd = the engine root, so the
+        # package importable there is what answers (the real one prints one JSON document too)
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            pkg = Path(d, 'porter')
+            pkg.mkdir()
+            (pkg / '__init__.py').write_text('', encoding='utf-8')
+            (pkg / '__main__.py').write_text(
+                'import json, sys\n'
+                "if '--fail' in sys.argv: print('boom'); raise SystemExit(2)\n"
+                "print(json.dumps({'ok': 1}))\n", encoding='utf-8')
+            doc, code = aport.run_json(d, sys.executable, [])
+            self.assertEqual((doc, code), ({'ok': 1}, 0))
+            doc, code = aport.run_json(d, sys.executable, ['--fail'])
+            self.assertIsNone(doc)
+            self.assertEqual(code, 2)
 
 
 class ClassifyTests(unittest.TestCase):
