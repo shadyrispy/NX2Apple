@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from . import android_engine as aeng
 from . import build_failure as bf
 from . import features as feat
 from . import inputs
@@ -38,6 +39,13 @@ from . import style
 from .app_update import APP_VERSION
 from .build_notes import TEXT, TITLE, stale_reason
 from .i18n import Lang
+
+# porter -l's game language (the list nx2android's own GUI offers); '' is porter's default (English)
+ANDROID_LANGUAGES: tuple[tuple[str, str], ...] = (
+    ('', 'English (default)'), ('ja', 'Japanese'), ('fr', 'French'), ('de', 'German'),
+    ('it', 'Italian'), ('es', 'Spanish'), ('nl', 'Dutch'), ('pt', 'Portuguese'),
+    ('ru', 'Russian'), ('ko', 'Korean'), ('zh-Hans', '简体中文'), ('zh-Hant', '繁體中文'),
+)
 from .model import Dep, DepState, Model
 from .sheets import CheatsDialog, DefenderPromptDialog, DeleteGameDialog, FreeSpaceDialog, OnboardingDialog
 from .widgets import (
@@ -902,6 +910,11 @@ class MainWindow(QMainWindow):
         self.target_group = self._build_target_card()
         self.body_col.addWidget(self.target_group)
 
+        # Card 2b: Android options (visible only while the target is Android)
+        self.android_group = self._build_android_card()
+        self.body_col.addWidget(self.android_group)
+        self.android_group.hide()
+
         # Card 3: Install or Export / Shared App vs One-Game IPA + Drive Copy (InstallCard)
         self.install_group = self._build_install_card()
         self.body_col.addWidget(self.install_group)
@@ -1115,8 +1128,6 @@ class MainWindow(QMainWindow):
 
         self.target_btn = QPushButton()
         self.target_btn.clicked.connect(self._toggle_target)
-        if pu.IS_WIN:
-            self.target_btn.hide()
         rp_lay.addWidget(self.target_btn)
         grp.add_row(r_plat)
         grp.add_divider()
@@ -1146,6 +1157,144 @@ class MainWindow(QMainWindow):
 
     def _on_bc_toggled(self, checked: bool) -> None:
         self.m.bc_on_cpu = checked
+
+    def _build_android_card(self) -> CardGroup:
+        """porter's own options (android_porter.port_args) for the Android target."""
+        grp = CardGroup(title=self.m.t('android.section'))
+        self._android_switch_labels = []
+
+        # Game language (porter -l)
+        r_lang = QWidget()
+        rl_lay = QHBoxLayout(r_lang)
+        rl_lay.setContentsMargins(18, 12, 18, 12)
+        rl_lay.setSpacing(12)
+        rl_lay.addWidget(_dot(style.GREEN))
+        lcol = QVBoxLayout()
+        lcol.setSpacing(2)
+        self.android_lang_lbl = QLabel(self.m.t('android.lang'))
+        self.android_lang_lbl.setObjectName('rowTitle')
+        self.android_lang_note = QLabel(self.m.t('android.lang.note'))
+        self.android_lang_note.setObjectName('muted')
+        self.android_lang_note.setWordWrap(True)
+        lcol.addWidget(self.android_lang_lbl)
+        lcol.addWidget(self.android_lang_note)
+        rl_lay.addLayout(lcol, 1)
+        self.android_lang_combo = QComboBox()
+        self.android_lang_combo.setObjectName('launcherDropdown')
+        for code, label in ANDROID_LANGUAGES:
+            self.android_lang_combo.addItem(label, code)
+        self.android_lang_combo.setCurrentIndex(max(self.android_lang_combo.findData(self.m.android_language), 0))
+        self.android_lang_combo.currentIndexChanged.connect(self._on_android_lang)
+        rl_lay.addWidget(self.android_lang_combo)
+        grp.add_row(r_lang)
+        grp.add_divider()
+
+        self._android_switch_row('android.fps60', 'android.fps60.note', self.m.android_fps60,
+                                 self._on_android_fps, grp)
+        self._android_switch_row('android.touch', 'android.touch.note', self.m.android_touch,
+                                 self._on_android_touch, grp)
+        self._android_switch_row('android.mtReplay', 'android.mtReplay.note', self.m.android_mt_replay,
+                                 self._on_android_mtr, grp)
+        self._android_switch_row('android.install', 'android.install.note', self.m.android_install,
+                                 self._on_android_install, grp)
+
+        # Device row: what adb sees (porter devices --json)
+        r_dev = QWidget()
+        rd_lay = QHBoxLayout(r_dev)
+        rd_lay.setContentsMargins(18, 12, 18, 12)
+        rd_lay.setSpacing(12)
+        rd_lay.addWidget(_dot(style.NEUTRAL_DOT))
+        dcol = QVBoxLayout()
+        dcol.setSpacing(2)
+        self.android_device_lbl = QLabel(self.m.t('android.device'))
+        self.android_device_lbl.setObjectName('rowTitle')
+        self.android_device_note = QLabel(self.m.t('android.device.note'))
+        self.android_device_note.setObjectName('muted')
+        self.android_device_note.setWordWrap(True)
+        dcol.addWidget(self.android_device_lbl)
+        dcol.addWidget(self.android_device_note)
+        rd_lay.addLayout(dcol, 1)
+        self.android_device_combo = QComboBox()
+        self.android_device_combo.setObjectName('launcherDropdown')
+        self.android_device_combo.currentIndexChanged.connect(self._on_android_device)
+        rd_lay.addWidget(self.android_device_combo)
+        self.android_dev_refresh_btn = QPushButton(self.m.t('android.refreshDevices'))
+        self.android_dev_refresh_btn.setObjectName('ghost')
+        self.android_dev_refresh_btn.clicked.connect(self.m.android_list_devices)
+        rd_lay.addWidget(self.android_dev_refresh_btn)
+        grp.add_row(r_dev)
+
+        return grp
+
+    def _android_switch_row(self, title_key: str, note_key: str, checked: bool, slot, grp: CardGroup) -> None:
+        r = QWidget()
+        lay = QHBoxLayout(r)
+        lay.setContentsMargins(18, 12, 18, 12)
+        lay.setSpacing(12)
+        lay.addWidget(_dot(style.NEUTRAL_DOT))
+        col = QVBoxLayout()
+        col.setSpacing(2)
+        title = QLabel(self.m.t(title_key))
+        title.setObjectName('rowTitle')
+        note = QLabel(self.m.t(note_key))
+        note.setObjectName('muted')
+        note.setWordWrap(True)
+        col.addWidget(title)
+        col.addWidget(note)
+        lay.addLayout(col, 1)
+        sw = LauncherSwitch(checked)
+        sw.toggled.connect(slot)
+        lay.addWidget(sw)
+        grp.add_row(r)
+        grp.add_divider()
+        self._android_switch_labels.append((title, note, title_key, note_key))
+
+    def _on_android_lang(self, idx: int) -> None:
+        self.m.android_language = str(self.android_lang_combo.itemData(idx) or '')
+
+    def _on_android_fps(self, checked: bool) -> None:
+        self.m.android_fps60 = checked
+        self.m.settings_set('androidFps60', checked)
+
+    def _on_android_touch(self, checked: bool) -> None:
+        self.m.android_touch = checked
+        self.m.settings_set('androidTouch', checked)
+
+    def _on_android_mtr(self, checked: bool) -> None:
+        self.m.android_mt_replay = checked
+        self.m.settings_set('androidMtReplay', checked)
+
+    def _on_android_install(self, checked: bool) -> None:
+        self.m.android_install = checked
+        self.m.settings_set('androidInstall', checked)
+
+    def _on_android_device(self, idx: int) -> None:
+        self.m.android_device = str(self.android_device_combo.itemData(idx) or '')
+        self.m.settings.setValue('androidDevice', self.m.android_device)
+
+    def _refresh_android_card(self) -> None:
+        """Retranslate the Android options card and refresh its device dropdown."""
+        t = self.m.t
+        self.android_group.set_title(t('android.section'))
+        self.android_lang_lbl.setText(t('android.lang'))
+        self.android_lang_note.setText(t('android.lang.note'))
+        for title, note, title_key, note_key in self._android_switch_labels:
+            title.setText(t(title_key))
+            note.setText(t(note_key))
+        self.android_device_lbl.setText(t('android.device'))
+        self.android_device_note.setText(t('android.device.note'))
+        self.android_dev_refresh_btn.setText(t('android.refreshDevices'))
+        combo = self.android_device_combo
+        prev = self.m.android_device
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(t('android.deviceAuto'), '')
+        for d in self.m.android_devices:
+            combo.addItem(str(d.get('info') or d.get('serial') or ''), str(d.get('serial') or ''))
+        if prev:
+            combo.setCurrentIndex(max(combo.findData(prev), 0))
+        combo.setEnabled(bool(self.m.android_devices))
+        combo.blockSignals(False)
 
     def _build_install_card(self) -> CardGroup:
         grp = CardGroup(title=self.m.t('dev.section'))
@@ -1466,6 +1615,16 @@ class MainWindow(QMainWindow):
         self.reveal_app_btn.hide()
         act.addWidget(self.reveal_app_btn)
 
+        self.reveal_apk_btn = QPushButton(f"{self.m.t('shell.showInFinder')} (APK)")
+        self.reveal_apk_btn.clicked.connect(lambda: pu.reveal(self.m.apk_path))
+        self.reveal_apk_btn.hide()
+        act.addWidget(self.reveal_apk_btn)
+
+        self.reveal_data_btn = QPushButton(self.m.t('android.dataPack'))
+        self.reveal_data_btn.clicked.connect(lambda: pu.reveal(self.m.android_data_path))
+        self.reveal_data_btn.hide()
+        act.addWidget(self.reveal_data_btn)
+
         grp.add_row(r)
 
         # BuildFailureCard (shown on a known early stop)
@@ -1742,6 +1901,47 @@ class MainWindow(QMainWindow):
         grp.add_row(r_cache)
         grp.add_divider()
 
+        # Row 2.6: Android engine folder (nx2android's porter; android_engine.py)
+        self.android_engine_row = QWidget()
+        rae_lay = QHBoxLayout(self.android_engine_row)
+        rae_lay.setContentsMargins(18, 12, 18, 12)
+        rae_lay.setSpacing(12)
+        self.android_engine_dot = _dot(style.NEUTRAL_DOT)
+        rae_lay.addWidget(self.android_engine_dot)
+        ae_col = QVBoxLayout()
+        ae_col.setSpacing(2)
+        self.android_engine_title_lbl = QLabel(self.m.t('androidEngine.row'))
+        self.android_engine_title_lbl.setObjectName('rowTitle')
+        self.android_engine_path_lbl = QLabel(self.m.android_engine_path or self.m.t('androidEngine.none'))
+        self.android_engine_path_lbl.setObjectName('mono')
+        self.android_engine_path_lbl.setWordWrap(True)
+        self.android_engine_note_lbl = QLabel(self.m.t('androidEngine.note'))
+        self.android_engine_note_lbl.setObjectName('muted')
+        self.android_engine_note_lbl.setWordWrap(True)
+        self.android_engine_status_lbl = QLabel('')
+        self.android_engine_status_lbl.setObjectName('muted')
+        self.android_engine_status_lbl.setWordWrap(True)
+        self.android_engine_status_lbl.hide()
+        ae_col.addWidget(self.android_engine_title_lbl)
+        ae_col.addWidget(self.android_engine_path_lbl)
+        ae_col.addWidget(self.android_engine_note_lbl)
+        ae_col.addWidget(self.android_engine_status_lbl)
+        rae_lay.addLayout(ae_col, 1)
+
+        self.android_engine_fetch_btn = QPushButton(self.m.t('androidEngine.fetch'))
+        self.android_engine_fetch_btn.clicked.connect(self._on_android_engine_fetch)
+        rae_lay.addWidget(self.android_engine_fetch_btn)
+
+        self.android_engine_choose_btn = QPushButton(self.m.t('androidEngine.choose'))
+        self.android_engine_choose_btn.clicked.connect(self._on_android_engine_choose)
+        rae_lay.addWidget(self.android_engine_choose_btn)
+
+        self.android_engine_open_btn = QPushButton(self.m.t('androidEngine.open'))
+        self.android_engine_open_btn.clicked.connect(self._on_android_engine_open)
+        rae_lay.addWidget(self.android_engine_open_btn)
+        grp.add_row(self.android_engine_row)
+        grp.add_divider()
+
         # Row 2.8: Windows Security exclusions (Windows / NSPB_SHOW_DEFENDER_ROW=1)
         self.defender_row_widget = QWidget()
         rdef_lay = QHBoxLayout(self.defender_row_widget)
@@ -1824,6 +2024,45 @@ class MainWindow(QMainWindow):
         except OSError:
             pass
         pu.reveal(str(p))
+
+    def _on_android_engine_fetch(self) -> None:
+        self.m.fetch_android_engine()
+
+    def _on_android_engine_choose(self) -> None:
+        d = QFileDialog.getExistingDirectory(self, self.m.t('androidEngine.pick'), str(Path.home()))
+        if not d:
+            return
+        self.m.android_engine_chosen = d
+        self.m.settings.setValue('androidEnginePath', d)
+        self.m.check_deps()
+        self._refresh_all()
+
+    def _on_android_engine_open(self) -> None:
+        p = self.m.android_engine_path or aeng.default_dest(lib.default_state_dir())
+        if p:
+            try:
+                Path(p).mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
+            pu.reveal(p)
+
+    def _refresh_android_engine_row(self) -> None:
+        m = self.m
+        p = m.android_engine_path
+        self.android_engine_path_lbl.setText(p or m.t('androidEngine.none'))
+        if m.android_fetching:
+            _set_dot(self.android_engine_dot, style.AMBER)
+            self.android_engine_status_lbl.setText(m.t('androidEngine.fetching'))
+            self.android_engine_status_lbl.show()
+        elif m.android_failure:
+            _set_dot(self.android_engine_dot, style.RED)
+            self.android_engine_status_lbl.setText(m.t('androidEngine.failed'))
+            self.android_engine_status_lbl.show()
+        else:
+            _set_dot(self.android_engine_dot, style.GREEN if p else style.NEUTRAL_DOT)
+            self.android_engine_status_lbl.hide()
+        self.android_engine_fetch_btn.setText(m.t('androidEngine.update' if p else 'androidEngine.fetch'))
+        self.android_engine_fetch_btn.setEnabled(not m.android_fetching)
 
     def _move_shell_cache(self) -> None:
         d = QFileDialog.getExistingDirectory(
@@ -2202,11 +2441,15 @@ class MainWindow(QMainWindow):
         self.cache_move_btn.setText(t('shellCache.move'))
         self.cache_default_btn.setText(t('shellCache.useDefault'))
         self.cache_default_btn.setVisible(not self.m.shell_cache_is_default)
+        self._refresh_android_engine_row()
+        self._refresh_android_card()
         self.diag_title_lbl.setText(t('diag.title'))
         self.diag_note_lbl.setText(t('diag.note'))
         self.diag_btn.setText(t('diag.copy'))
         self.reveal_ipa_btn.setText(f"{t('shell.showInFinder')} (IPA)")
         self.reveal_arc_btn.setText(f"{t('shell.showInFinder')} (romfs)")
+        self.reveal_apk_btn.setText(f"{t('shell.showInFinder')} (APK)")
+        self.reveal_data_btn.setText(t('android.dataPack'))
         self.top_bar.recenter_nav()
 
         self.app_group.set_title(t('section.app'))
@@ -2585,16 +2828,51 @@ class MainWindow(QMainWindow):
 
     def _refresh_target(self) -> None:
         t = self.m.t
-        ios = self.m.target == 'ios'
-        self.target_title_lbl.setText(t('build.ios') if ios else t('build.mac'))
-        self.target_btn.setText(t('target.ios' if ios else 'target.mac'))
+        tgt = self.m.target
+        if tgt == 'mac-app':
+            title, btn, hint = t('build.mac'), t('target.mac'), t('target.hint.mac')
+        elif tgt == 'android':
+            title, btn = t('build.android'), t('target.android')
+            hint = self._android_status_text() or t('android.hint')
+        else:
+            title, btn, hint = t('build.ios'), t('target.ios'), t('target.hint.ios')
+        self.target_title_lbl.setText(title)
+        self.target_btn.setText(btn)
         self.target_btn.setToolTip(t('target.tip'))
-        self.target_hint.setText(t('target.hint.ios' if ios else 'target.hint.mac'))
+        self.target_hint.setText(hint)
+
+    def _android_status_text(self) -> str:
+        """porter's verdict on the chosen inputs (its inspect --json): which game, and whether an
+        Android profile covers it. Empty while nothing has been asked yet."""
+        t = self.m.t
+        ins = self.m.android_inspect
+        if self.m.android_inspect_busy:
+            return t('android.checking')
+        if not isinstance(ins, dict):
+            return ''
+        if ins.get('error'):
+            return t('android.gameUnsupported')
+        android = ins.get('android') if isinstance(ins.get('android'), dict) else {}
+        status = str(android.get('status') or '')
+        if status == 'playable':
+            st = t('android.status.playable')
+        elif status == 'wip':
+            st = t('android.status.wip')
+        elif status == 'boots':
+            st = t('android.status.boots')
+        elif status == 'experimental':
+            st = t('android.status.experimental')
+        else:
+            return t('android.status.iosOnly')
+        name = str(ins.get('name') or '')
+        return t('android.gameStatus', name, st) if name else st
 
     def _toggle_target(self) -> None:
-        if self.m.running or pu.IS_WIN:
+        if self.m.running:
             return
-        self.m.target = 'mac-app' if self.m.target == 'ios' else 'ios'
+        order = ('ios', 'android') if pu.IS_WIN else ('ios', 'mac-app', 'android')
+        cur = order.index(self.m.target) if self.m.target in order else 0
+        self.m.set_target(order[(cur + 1) % len(order)])
         self._refresh_target()
 
     def _refresh_stages(self) -> None:
@@ -2647,9 +2925,12 @@ class MainWindow(QMainWindow):
         self.files_group.setEnabled(not running)
         self.target_group.setEnabled(not running)
         self.ipa_kind_seg.setEnabled(not running)
+        android = self.m.target == 'android'
+        self.android_group.setVisible(expanded and android)
+        self.android_group.setEnabled(not running)
         # A previous export can still be revealed or copied to a drive.
-        self.install_group.setVisible(expanded or os.path.isfile(self._effective_ipa_path())
-                                      or os.path.isdir(self._effective_archive_path()))
+        self.install_group.setVisible(not android and (expanded or os.path.isfile(self._effective_ipa_path())
+                                                       or os.path.isdir(self._effective_archive_path())))
         setup_needed = not self.m.repo_ok or (self.m.deps_checked and not self.m.all_deps_ok)
         self.setup_hint_card.setVisible(expanded and setup_needed)
 
@@ -2690,7 +2971,11 @@ class MainWindow(QMainWindow):
             self.running_setup.setChecked(False)
         self._refresh_build_inputs()
         self._refresh_progress_visibility()
-        note = ('activity.ios' if self.m.target == 'ios' else 'activity.mac') if self.m.running else 'build.intro'
+        if self.m.running:
+            note = 'activity.ios' if self.m.target == 'ios' else \
+                ('activity.mac' if self.m.target == 'mac-app' else 'activity.android')
+        else:
+            note = 'build.intro'
         self.build_heading.set_text(t('build.heading'), t(note))
         self.setup_hint_title.setText(t('library.setupHint'))
         self.setup_hint_sub.setText(t('status.chooseRepo') if not self.m.repo_ok else t('status.installFirst'))
@@ -2728,6 +3013,8 @@ class MainWindow(QMainWindow):
         self.reveal_ipa_btn.hide()
         self.reveal_arc_btn.hide()
         self.reveal_app_btn.setVisible(bool(self.m.mac_app_path) and Path(self.m.mac_app_path).exists())
+        self.reveal_apk_btn.setVisible(bool(self.m.apk_path) and Path(self.m.apk_path).is_file())
+        self.reveal_data_btn.setVisible(bool(self.m.android_data_path) and Path(self.m.android_data_path).is_dir())
         self._refresh_install_card()
         self._refresh_library()
         self._refresh_activity_bar()
@@ -2965,6 +3252,8 @@ class MainWindow(QMainWindow):
         self.reveal_ipa_btn.hide()
         self.reveal_arc_btn.hide()
         self.reveal_app_btn.hide()
+        self.reveal_apk_btn.hide()
+        self.reveal_data_btn.hide()
         self.footer.setText('')
         self.m.start_build(title_id=title_id)
 

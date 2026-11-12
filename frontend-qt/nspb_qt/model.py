@@ -18,6 +18,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QSettings, Q_ARG, QMetaObject, QObject, Qt, QThread, Signal, Slot
 
+from . import android_engine as aeng
+from . import android_porter as aport
 from . import app_update
 from . import build_failure as bf
 from . import build_notes
@@ -48,6 +50,7 @@ class Dep:
     state: DepState = DepState.MISSING
     detail: str = ''            # a path, or a localisation key, or "key:arg"
     install: list[str] = field(default_factory=list)   # command that fixes it, empty = manual
+    cwd: str = ''               # where install runs (a porter fix runs `-m porter` inside its engine folder)
     installing: bool = False
     required: bool = True       # a missing optional row (spirv-cross for Metal games, glslangValidator)
                                 # is not part of "缺 N 项": it does not stop the build in front of you
@@ -278,9 +281,28 @@ class Model(QObject):
         self.ipa_path = ''
         self.archive_path = ''
         self.mac_app_path = ''
-        self.target = 'ios'   # 'ios' (an IPA) or 'mac-app' (a double-clickable Mac app; macOS only)
+        self.apk_path = ''              # android: the built APK (porter's result event)
+        self.android_data_path = ''     # android: the data pack folder (<App>-data)
+        self.android_result: dict | None = None
+        self.target = 'ios'   # 'ios' (an IPA), 'mac-app' (a double-clickable Mac app; macOS only) or 'android' (an APK + data pack)
         self.bc_on_cpu = False
         self.ipa_kind = 'shared'   # 'shared' (shell.ipaShared) or 'oneGame' (shell.ipaOneGame)
+        # Android options (android_porter.py's port_args consume them)
+        self.android_language = ''
+        self.android_fps60 = self.settings_value('androidFps60', False) is True
+        self.android_touch = self.settings_value('androidTouch', False) is True
+        self.android_mt_replay = self.settings_value('androidMtReplay', False) is True
+        self.android_install = self.settings_value('androidInstall', False) is True
+        self.android_headroom: int | None = None   # porter's auto by default (--alias-headroom when set)
+        self.android_device = str(self.settings.value('androidDevice', defaultValue='', type=str) or '')
+        self.android_devices: list[dict] = []   # adb's rows (porter devices --json)
+        self.android_devices_busy = False
+        self.android_engine_chosen = str(self.settings.value('androidEnginePath', defaultValue='', type=str) or '')
+        self.android_fetching = False
+        self.android_failure: str | None = None   # aeng's failure kind, None when the last fetch was fine
+        self.android_inspect: dict | None = None  # porter inspect --json for the chosen inputs (its android.tsv status)
+        self.android_inspect_busy = False
+        self._android_run: aport.RunView | None = None
         self.library = lib.GameLibrary()
         self.artwork = lib.ArtworkStore(on_updated=lambda _tid: self._emit_library_changed())
         self.repo_busy = False
@@ -554,6 +576,120 @@ class Model(QObject):
         self.sync_engine()
         self.repoChanged.emit()
 
+    # ---- Android engine (nx2android's porter + its nxnative fork; android_engine.py)
+
+    @property
+    def android_engine_path(self) -> str:
+        """The folder porter runs in: the player's pick (Settings), else the state folder's clone ('' when neither is there)."""
+        return aeng.installed(lib.default_state_dir(), self.android_engine_chosen)
+
+    def fetch_android_engine(self, then: Callable[[bool], None] | None = None) -> None:
+        """Clone, or update, the Android engine on a thread. `then(ok)` runs on the worker thread
+        (start_build hands it a QMetaObject hop, the way sync_engine's caller does)."""
+        if self.android_fetching:
+            if then: then(False)
+            return
+        dest = self.android_engine_path
+        if dest:
+            cmds = aeng.update_commands(dest)
+        else:
+            dest = aeng.default_dest(lib.default_state_dir())
+            if not dest:
+                if then: then(False)
+                return
+            try:
+                Path(dest).parent.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
+            cmds = [aeng.clone_command(dest)]
+        self.android_fetching = True
+        self.android_failure = None
+        self.log('$ ' + ' ; '.join(' '.join(c) for c in cmds) + '\n')
+        self.repoChanged.emit()
+
+        def work() -> None:
+            # A GUI launch inherits no PATH, and the clone spawns `git` by name — Windows may have
+            # no git at all (the same player the repository download installed PortableGit for).
+            extra: dict[str, str] | None = None
+            if pu.IS_WIN:
+                git = self._ensure_windows_git()
+                if not git:
+                    self.android_fetching = False
+                    self.android_failure = aeng.ANDROID_FETCH
+                    self._emit_repo_changed()
+                    if then: then(False)
+                    return
+                extra = {'PATH': str(Path(git).parent) + os.pathsep + pu.child_env()['PATH']}
+            ok, kind = True, None
+            for cmd in cmds:
+                ok, kind = aeng.run_fetch(cmd, str(Path.home()), self.log,
+                                          env=pu.child_env(extra), **pu.no_window_kwargs())
+                if not ok:
+                    break
+            self.android_fetching = False
+            self.android_failure = None if ok else (kind or aeng.ANDROID_FETCH)
+            self._emit_repo_changed()
+            if then: then(ok)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def set_target(self, t: str) -> None:
+        """Switch what a build makes. The dependency rows are target-specific, so the panel
+        rechecks; Android also asks porter what it makes of the chosen inputs."""
+        if self.running or t not in ('ios', 'mac-app', 'android') or t == self.target:
+            return
+        self.target = t
+        if t == 'android':
+            self.android_check_inputs()
+            self.android_list_devices()
+        self.check_deps()
+        self.repoChanged.emit()
+
+    def android_check_inputs(self) -> None:
+        """`porter inspect` on the chosen game folder: which game it is and whether an Android
+        profile covers it (its status). Runs off the UI thread; the target row shows the answer."""
+        if self.target != 'android' or self.android_inspect_busy or self.running:
+            return
+        folder = self.game_folder
+        if folder is None and not self.base_path:
+            self.android_inspect = None
+            self._emit_repo_changed()
+            return
+        eng = self.android_engine_path
+        if not eng:
+            self.android_inspect = None
+            self._emit_repo_changed()
+            return
+        src = folder.folder if folder is not None else str(Path(self.base_path).parent)
+        py = self.python_path or ('python' if pu.IS_WIN else '/usr/bin/python3')
+        self.android_inspect_busy = True
+
+        def work() -> None:
+            doc, _code = aport.run_json(eng, py, aport.inspect_args(src, '' if folder is not None else self.keys_path),
+                                        timeout=300)
+            self.android_inspect = doc if isinstance(doc, dict) else None
+            self.android_inspect_busy = False
+            self._emit_repo_changed()
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def android_list_devices(self) -> None:
+        """The devices adb sees (`porter devices --json`), for the install row's dropdown."""
+        eng = self.android_engine_path
+        if not eng or self.android_devices_busy:
+            return
+        py = self.python_path or ('python' if pu.IS_WIN else '/usr/bin/python3')
+        self.android_devices_busy = True
+        self._emit_repo_changed()
+
+        def work() -> None:
+            doc, _code = aport.run_json(eng, py, aport.devices_args(), timeout=60)
+            self.android_devices = doc if isinstance(doc, list) else []
+            self.android_devices_busy = False
+            self._emit_repo_changed()
+
+        threading.Thread(target=work, daemon=True).start()
+
     def _find_repo(self) -> str:
         bundled = engine.bundled_engine()
         if bundled:
@@ -662,6 +798,36 @@ class Model(QObject):
         return Dep('python', 'dep.python', 'dep.python.hint', DepState.OLD,
                    f'dep.python.old:{py_ver or "?"}')
 
+    def _android_deps(self) -> list[Dep]:
+        """The Android target's rows: the engine itself, then porter's toolchain from its own
+        doctor (`porter doctor --json` knows the NDK, .NET and adb). porter's Python row is the
+        launcher's row already; its keys and disk rows are the files card's and the pre-build
+        check's, so they do not come here."""
+        eng = self.android_engine_path
+        if not eng:
+            dest = self.android_engine_chosen or aeng.default_dest(lib.default_state_dir())
+            return [Dep('android_engine', 'dep.androidEngine', 'dep.androidEngine.hint', DepState.MISSING,
+                        dest or 'dep.androidEngine.none')]
+        deps: list[Dep] = [Dep('android_engine', 'dep.androidEngine', 'dep.androidEngine.hint', DepState.OK, eng)]
+        py = self.python_path or ('python' if pu.IS_WIN else '/usr/bin/python3')
+        doc, _code = aport.run_json(eng, py, aport.doctor_args(), timeout=180)
+        rows = doc if isinstance(doc, list) else (doc.get('rows') if isinstance(doc, dict) else None)
+        by_name = {r.get('name'): r for r in rows if isinstance(r, dict)} if rows else {}
+        for name, dep_id, key, only in (('Android NDK', 'android_ndk', 'dep.androidNdk', 'ndk'),
+                                        ('.NET SDK', 'android_dotnet', 'dep.dotnet', 'dotnet'),
+                                        ('adb', 'android_adb', 'dep.androidAdb', 'adb')):
+            r = by_name.get(name)
+            if r is None:
+                continue
+            ok = bool(r.get('ok'))
+            deps.append(Dep(dep_id, key, key + '.hint',
+                            DepState.OK if ok else DepState.MISSING,
+                            str(r.get('detail') or '') if ok else '',
+                            install=[] if ok else [py, '-m', 'porter', *aport.tools_args(download=True, only=only)],
+                            required=bool(r.get('required', True)),
+                            cwd=eng))
+        return deps
+
     def _check_deps(self) -> None:
         deps: list[Dep] = []
 
@@ -684,8 +850,10 @@ class Model(QObject):
                             DepState.OK if dn_ok else DepState.MISSING,
                             dn if dn_ok else 'dep.dotnet.missing'))
 
-        # Xcode (macOS) or the cross toolchain (Windows)
-        if pu.IS_WIN:
+        # Target-specific rows: porter's toolchain for Android, Xcode (macOS) or the cross toolchain (Windows)
+        if self.target == 'android':
+            deps.extend(self._android_deps())
+        elif pu.IS_WIN:
             deps.extend(self._windows_deps(deps))
         else:
             xc = pu.xcode_ok()
@@ -1527,6 +1695,7 @@ class Model(QObject):
                         p = subprocess.Popen(dep.install, stdout=subprocess.PIPE,
                                              stderr=subprocess.STDOUT, text=True,
                                              encoding='utf-8', errors='replace', env=pu.child_env(),
+                                             cwd=dep.cwd or None,
                                              **pu.no_window_kwargs())
                         assert p.stdout is not None
                         for line in p.stdout:
@@ -2235,6 +2404,13 @@ class Model(QObject):
         else:
             self.finished.emit(False, self.t('msg.repoInvalidEmpty'))
 
+    @Slot(bool)
+    def _build_after_android_fetch(self, ok: bool) -> None:
+        if ok and self.android_engine_path:
+            self.start_build()
+        else:
+            self.finished.emit(False, self.t('android.fetchFailed'))
+
     @Slot(str)
     def _emit_log(self, s: str) -> None:
         """Main-thread half of log(): see log() for why the hop exists."""
@@ -2482,9 +2658,15 @@ class Model(QObject):
             self.sync_engine(lambda ok: QMetaObject.invokeMethod(
                 self, '_build_after_sync', Qt.QueuedConnection, Q_ARG(bool, ok), Q_ARG(str, title_id or '')))
             return
+        android = self.target == 'android'
+        if android and aeng.needs_fetch(lib.default_state_dir(), self.android_engine_chosen):
+            # the Android engine is not fetched yet: get it, then build
+            self.fetch_android_engine(lambda ok: QMetaObject.invokeMethod(
+                self, '_build_after_android_fetch', Qt.QueuedConnection, Q_ARG(bool, ok)))
+            return
         py = self.python_path or ('python' if pu.IS_WIN else '/usr/bin/python3')
         folder = self.game_folder
-        if folder is not None:
+        if folder is not None and not android:
             why = self.game_folder_engine_problem(folder)
             if why:
                 self.finished.emit(False, why)
@@ -2556,7 +2738,7 @@ class Model(QObject):
 
         compressed = any(Path(f).suffix.lower() in ('.nsz', '.xcz')
                          for f in staged if f)
-        if compressed and not pu._runs(py, ['-c', 'import nsz']):
+        if not android and compressed and not pu._runs(py, ['-c', 'import nsz']):
             self.log(self.t('msg.installingNsz') + '\n')
             if not pu._runs(py, ['-m', 'pip', 'install', 'nsz']):
                 self.finished.emit(False, self.t('msg.nszFailed', py))
@@ -2565,32 +2747,55 @@ class Model(QObject):
         # On Windows the upstream script is started through the driver, which loads it as a
         # module and replaces the steps that assume a Mac (see nspb_qt/win/driver.py). The
         # options are identical, so the command line stays comparable between the platforms.
-        if pu.IS_WIN:
+        # The Android target runs its own engine's porter instead (android_porter.py): a folder
+        # in, an APK and data pack out, `--progress json` events the parser below folds into the
+        # same stage list the `--progress lines` parser builds.
+        if android:
+            args = ['-m', 'porter', *aport.port_args(
+                input_dir,
+                keys='' if folder is not None else self.keys_path,
+                out=self.out_dir or '',
+                language=self.android_language,
+                install=self.android_install, device=self.android_device,
+                fps60=self.android_fps60, touch=self.android_touch, mt_replay=self.android_mt_replay,
+                alias_headroom=self.android_headroom)]
+            cwd = self.android_engine_path
+        elif pu.IS_WIN:
             entry = ['-m', 'nspb_qt.win.driver']
             cwd = str(Path(__file__).resolve().parents[1])
+            args = entry + [input_dir] + ([] if folder is not None else ['-k', self.keys_path]) + ['--progress', 'lines']
+            if title_id:
+                args += ['--title-id', title_id]
         else:
             entry = [str(Path(self.engine_path, 'scripts', 'build_ipa_from_nsp.py'))]
             cwd = self.engine_path
+            args = entry + [input_dir] + ([] if folder is not None else ['-k', self.keys_path]) + ['--progress', 'lines']
+            if title_id:
+                args += ['--title-id', title_id]
         # a game folder's files are not encrypted: no -k, the keys are not asked for
-        args = entry + [input_dir] + ([] if folder is not None else ['-k', self.keys_path]) + ['--progress', 'lines']
-        if title_id:
-            args += ['--title-id', title_id]
-        has_work_dir = self.supports_work_dir()
-        if has_work_dir:
-            args += ['--work-dir', work_dir]
-        else:
-            self.log(self.t('msg.noWorkDir') + '\n')
-        if folder is None and self.supports_romfs_from():
-            for img in pbc.reusable_romfs_images(self.out_dir or base_dir, tid_hex):
-                args += ['--romfs-from', img]
+        has_work_dir = False
+        if not android:
+            has_work_dir = self.supports_work_dir()
+            if has_work_dir:
+                args += ['--work-dir', work_dir]
+            else:
+                self.log(self.t('msg.noWorkDir') + '\n')
+            if folder is None and self.supports_romfs_from():
+                for img in pbc.reusable_romfs_images(self.out_dir or base_dir, tid_hex):
+                    args += ['--romfs-from', img]
         # A Mac app is a different output, not a different pipeline: --platform mac-app runs the
         # same steps and then packs dm/mac/pack_app.py's result. Its -o names the .app, and the
         # RomFS is inside it, so the archive step is skipped below.
         self.ipa_path = self.archive_path = self.mac_app_path = ''
+        self.apk_path = self.android_data_path = ''
+        self.android_result = None
+        self._android_run = aport.RunView() if android else None
         mac_app = self.target == 'mac-app'
         self.effective_work_dir = work_dir if has_work_dir else str(Path(base_dir if folder is not None else input_dir, f'{tid_hex}_build'))
-        use_shell_fw = not mac_app and self.ipa_kind == 'shared' and self.supports_shell_framework()
-        if mac_app:
+        use_shell_fw = self.target == 'ios' and self.ipa_kind == 'shared' and self.supports_shell_framework()
+        if android:
+            pass   # porter plans its own output (-o went into port_args); its result event names the files
+        elif mac_app:
             args += ['--platform', 'mac-app']
             self.mac_app_path = str(Path(self.out_dir or base_dir, f'{tid_hex}.app'))
             args += ['-o', self.mac_app_path]
@@ -2608,7 +2813,7 @@ class Model(QObject):
         elif self.out_dir or title_id:
             self.ipa_path = lib.one_game_ipa_path(self.out_dir or base_dir, tid_hex)
             args += ['-o', self.ipa_path]
-        if self.bc_on_cpu and not mac_app:
+        if self.bc_on_cpu and not mac_app and not android:
             try:
                 Path(self.effective_work_dir).mkdir(parents=True, exist_ok=True)
                 env_file = Path(self.effective_work_dir, '_env.txt')
@@ -2617,8 +2822,10 @@ class Model(QObject):
                 self.log(self.t('msg.bcOn') + '\n')
             except OSError as e:
                 self.log(self.t('msg.bcEnvFailed', str(e)) + '\n')
-        flag = self.override.take()   # for this build only: the next one asks again
-        args = bf.arguments(args, flag)
+        flag = None
+        if not android:
+            flag = self.override.take()   # for this build only: the next one asks again
+            args = bf.arguments(args, flag)
 
         input_game = None
         if self.base_path:
@@ -2628,7 +2835,7 @@ class Model(QObject):
                 dlc_paths=self.dlc_paths,
                 keys_path=self.keys_path,
                 output_dir=self.out_dir,
-                repo_path=self.engine_path,
+                repo_path=self.android_engine_path if android else self.engine_path,
                 title_id=title_id,
             )
             self._emit_library_changed()
@@ -2655,7 +2862,7 @@ class Model(QObject):
         if droot:
             env['DOTNET_ROOT'] = droot
             env['DOTNET_ROOT_ARM64'] = droot
-        if pu.IS_WIN:
+        if pu.IS_WIN and not android:
             # The shim folder goes first on PATH/PYTHONPATH so the tools the pipeline spawns by
             # name (xcrun, xcodebuild, which, dmsh_xlate, python3) resolve to the Windows
             # stand-ins, and the child interpreters load sitecustomize. Failing here stops the
@@ -2711,7 +2918,20 @@ class Model(QObject):
                 self._stop_pso_poll()
                 self._proc = None
             self._flush_lines()
-            if ok and mac_app:
+            if ok and android:
+                for st in self.stages:
+                    if st.state == 'running':
+                        st.state = 'done'
+                self.stagesChanged.emit()
+                res = self._android_run.result if self._android_run else None
+                if res:
+                    self.apk_path = str(res.get('apk') or '')
+                    self.android_data_path = str(res.get('data') or '')
+                    self.android_result = res
+                ok = bool(self.apk_path) and bool(self.android_data_path)
+                note = self.t('android.done', str((self.android_result or {}).get('name') or '')) if ok \
+                    else self.t('android.missingOutput')
+            elif ok and mac_app:
                 ok = bool(self.mac_app_path) and Path(self.mac_app_path).exists()
                 note = self.t('target.macDone' if ok else 'target.missingApp')
                 if ok:
@@ -2742,11 +2962,18 @@ class Model(QObject):
                 # The last real line says more than the exit code: "Build failed (exit code 1)"
                 # on its own sent a reporter looking for a log that was not on screen (#52)
                 last = getattr(self, '_last_error', '')
+                if android and self._android_run is not None and self._android_run.last_error:
+                    last = self._android_run.last_error
                 note = self.t('msg.buildFailedReason', last) if last else self.t('msg.buildFailed')
-                known = bf.classify(self.log_tail, keys_readable=self._keys_readable())
-                if known.kind != bf.UNKNOWN:   # a known early stop: the window explains it and offers the next step
-                    self.failure = known
-                    note = self.failure_what(known)
+                if android:
+                    if aport.classify(last) == 'keys':   # porter's own "no prod.keys" stop
+                        self.failure = bf.Failure(bf.KEYS)
+                        note = self.failure_what(self.failure)
+                else:
+                    known = bf.classify(self.log_tail, keys_readable=self._keys_readable())
+                    if known.kind != bf.UNKNOWN:   # a known early stop: the window explains it and offers the next step
+                        self.failure = known
+                        note = self.failure_what(known)
             return ok, note
 
         def work() -> None:
@@ -2904,6 +3131,9 @@ class Model(QObject):
     def _on_line(self, line: str) -> None:
         """Feed one line of the build's output: stage lines move the stage list, everything
         else goes to the log (which is what the window shows)."""
+        if self.target == 'android' and self._android_run is not None:
+            self._on_android_line(line)
+            return
         self.log(line + '\n')
         self.log_tail = (self.log_tail + line + '\n')[-12000:]   # what the classifier reads on a failure
         body = re.sub(r'^\[\d\d:\d\d:\d\d\]\s*', '', line).strip()
@@ -3040,6 +3270,30 @@ class Model(QObject):
                     self._stop_pso_poll()
         if should_start_poll:
             self._start_pso_poll()
+        self.stagesChanged.emit()
+
+    def _on_android_line(self, line: str) -> None:
+        """One stdout line of a porter run (`--progress json`): events move the stage list
+        (android_porter.RunView folds them), plain text — porter's stderr, which run_build merges
+        in — goes to the log, and a [RED] one becomes the failure note."""
+        self.log(line + '\n')
+        self.log_tail = (self.log_tail + line + '\n')[-12000:]
+        run = self._android_run
+        if run is None:
+            return
+        ev = aport.parse_event(line)
+        if ev is None:
+            if line.strip():
+                run.feed({'ev': 'say', 'msg': line})
+        else:
+            run.feed(ev)
+            if ev.get('ev') == 'result':
+                return   # the stage list is finished; the result carries the paths
+        with self._ensure_pso_lock():
+            self.stages = [Stage(id=st.id, name=st.name, state=st.state, detail=st.detail, percent=st.percent)
+                           for st in run.stages]
+        if run.last_error:
+            self._last_error = run.last_error[:200]
         self.stagesChanged.emit()
 
     def poll_pso_archive(self) -> None:

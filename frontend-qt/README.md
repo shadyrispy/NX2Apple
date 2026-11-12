@@ -60,6 +60,36 @@ the bundle's `fonts` folder (`build-qt.yml`). If the file is missing the system 
 - Languages: every language that has a file in `frontend/l10n` (today Chinese, Swedish, German and French)
   on devices in that language, English elsewhere, and the header button cycles through them.
 
+## Android target
+
+The target row now cycles through three outputs on macOS — **iPhone / iPad → This Mac → Android
+device** — and two on Windows (**iPhone / iPad → Android device**): the Android path is not the
+Windows iOS shim, so it gives Windows a second, independent build route. Selecting Android:
+
+- **Engine**: builds run `python -m porter …` from [nx2android](https://github.com/shirai91/nx2android)
+  (its own repository, which vendors its `nxnative/` engine beside `porter/`). The launcher keeps a
+  shallow clone in the state folder (`…/NS Port Builder/android-engine`); **Settings → Tools →
+  Android engine (porter)** fetches it, or points at an existing clone (`android_engine.py`).
+- **Dependencies**: the panel swaps the Xcode/Metal rows for porter's own
+  (`porter doctor --json`): Android NDK, .NET SDK and adb, each with an install action that runs
+  `porter tools --download --only …`. The Python row stays the launcher's.
+- **Options card**: the game's language (`-l`), 60 fps (`--fps60`), touch game (`--touch`),
+  multithread replay (`--mt-replay`) and **Install on the device when done** (`--install`), with
+  the device dropdown from `porter devices --json`.
+- **Build**: `porter port <folder> --progress json`; the JSON events (stage, step, progress,
+  stage_end, result) fold into the same stage list and log the iOS build shows
+  (`android_porter.py`). porter picks the newest game version in the folder itself, decompresses
+  NSZ/XCZ, and writes `<App>.apk` + `<App>-data` beside the game files (or in the chosen output
+  folder) — the two reveal buttons at the end name them. A keys problem on porter's side reuses
+  the existing failure card.
+- **Game check**: selecting Android also runs `porter inspect` on the chosen files; the target
+  row then says which game the folder holds and whether an Android profile covers it (playable,
+  work in progress, boots, experimental, or iOS-only).
+
+The device installs and saves (export/import) still run through porter's CLI (`porter install`,
+`porter saves`); the window's buttons for them are the next step. The Android engine, its
+toolchain and a port need about 30 GB of free disk.
+
 ## What is not there yet
 
 - **The Windows build path remains experimental.** One Rhythm Heaven Groove 1.0.0 IPA built on
@@ -87,6 +117,8 @@ nspb_qt/
   platform_util.py  per-OS paths, tool discovery, child environment
   i18n.py           language choice
   l10n.py           the texts, read from ../frontend/l10n/*.json (the SwiftUI app reads the same files)
+  android_engine.py where the Android engine lives (nx2android's clone) and how to fetch it
+  android_porter.py porter's CLI adapter: one-JSON-document commands and the --progress json events
   win/              the Windows build path; imported only when sys.platform is win32
 tests/test_win.py   the Windows-path tests that can run on macOS
 ```
