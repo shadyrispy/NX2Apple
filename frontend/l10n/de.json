@@ -48,7 +48,7 @@
   "androidEngine.row": "Android-Engine (porter)",
   "androidEngine.update": "Aktualisieren",
   "androidSaves.busy": "Läuft …",
-  "androidSaves.deviceNote": "Die Saves des Spiels liegen auf dem Gerät; ein Export ist ein Ordner hier, ein Import nimmt einen Ordner oder eine .zip (auch den Save einer Konsole).",
+  "androidSaves.deviceNote": "Die Saves des Spiels liegen auf dem Gerät. Ein Export ist ein Ordner hier, ein Import nimmt einen Ordner oder eine .zip (auch den Save einer Konsole).",
   "androidSaves.export": "Save exportieren",
   "androidSaves.exported": "Exportiert nach %@",
   "androidSaves.game": "Spiel",
