@@ -154,7 +154,7 @@ class AndroidTargetTests(unittest.TestCase):
             self.assertTrue(w.android_install_pack_btn.isHidden())
 
     def test_saves_dialog_without_an_engine_says_so(self) -> None:
-        from PySide6.QtCore import Qt
+        from PySide6.QtCore import QEvent
         from nspb_qt.i18n import Lang
         from nspb_qt.sheets import AndroidSavesDialog
 
@@ -169,7 +169,7 @@ class AndroidTargetTests(unittest.TestCase):
             self.assertFalse(dlg.status_lbl.text().startswith('androidSaves.'),
                              f'{lang.code}: the saves dialog shows a raw key')
             dlg.close()
-            self.app.sendPostedEvents(None, Qt.DeferredDelete)
+            self.app.sendPostedEvents(None, QEvent.DeferredDelete)
             self.app.processEvents()
 
     def test_android_dep_rows_replace_ios_ones(self) -> None:

@@ -20,7 +20,7 @@
   "android.installDone": "Das Datenpaket und das APK sind auf dem Gerät",
   "android.installFailed": "Der Installationslauf brach ab: %@",
   "android.installPack": "Das Datenpaket auf dem Gerät installieren",
-  "android.installPack.note": "Legt das gebaute APK und seine Daten auf das angeschlossene Gerät; die Saves, die es hat, bleiben.",
+  "android.installPack.note": "Legt das gebaute APK und seine Daten auf das angeschlossene Gerät. Die Saves, die es hat, bleiben.",
   "android.installPackBtn": "Installieren",
   "android.lang": "Spielsprache",
   "android.lang.note": "Die Sprache, in der das Spiel startet.",
