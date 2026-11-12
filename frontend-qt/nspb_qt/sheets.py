@@ -3,12 +3,15 @@ from __future__ import annotations
 
 import os
 import shutil
+import threading
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QDialog,
     QFileDialog,
     QFrame,
@@ -1096,3 +1099,206 @@ class DefenderPromptDialog(QDialog):
     def _on_remove(self) -> None:
         self.choice = 'remove'
         self.accept()
+
+
+class AndroidSavesDialog(QDialog):
+    """A ported Android game's saves between the device and this PC (porter saves apps/list/export/import).
+
+    The package comes from the apps list (`porter saves apps --json`, which porter matches by name
+    or package), the rows from `saves list --json`; an export writes a fresh folder here, an import
+    takes a folder or a .zip (a console's save, as its save tools copy it, or an earlier export).
+    Everything runs through android_porter.run_json on a worker thread, like the Model's checks.
+    """
+
+    def __init__(self, model: 'Model', parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        from . import android_porter as aport   # imported here: sheets.py stays import-light for the tests
+        self.aport = aport
+        self.m = model
+        self.setWindowTitle(self.m.t('androidSaves.title'))
+        self.setMinimumSize(640, 480)
+        self.setStyleSheet(style.STYLESHEET)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 22, 24, 20)
+        lay.setSpacing(14)
+
+        head = QHBoxLayout()
+        title = QLabel(self.m.t('androidSaves.title'))
+        title.setStyleSheet('font-size: 20px; font-weight: 800;')
+        head.addWidget(title)
+        head.addStretch(1)
+        self.refresh_btn = QPushButton(self.m.t('androidSaves.refresh'))
+        self.refresh_btn.clicked.connect(self.refresh_apps)
+        head.addWidget(self.refresh_btn)
+        lay.addLayout(head)
+
+        note = QLabel(self.m.t('androidSaves.deviceNote'))
+        note.setObjectName('muted')
+        note.setWordWrap(True)
+        lay.addWidget(note)
+
+        app_row = QWidget()
+        ar_lay = QHBoxLayout(app_row)
+        ar_lay.setContentsMargins(0, 0, 0, 0)
+        ar_lay.setSpacing(10)
+        self.apps_lbl = QLabel(self.m.t('androidSaves.game'))
+        self.apps_lbl.setObjectName('rowTitle')
+        ar_lay.addWidget(self.apps_lbl)
+        self.apps_combo = QComboBox()
+        self.apps_combo.setObjectName('launcherDropdown')
+        self.apps_combo.currentIndexChanged.connect(self._on_app_changed)
+        ar_lay.addWidget(self.apps_combo, 1)
+        lay.addWidget(app_row)
+
+        self.status_lbl = QLabel('')
+        self.status_lbl.setObjectName('muted')
+        self.status_lbl.setWordWrap(True)
+        lay.addWidget(self.status_lbl)
+
+        grp = CardGroup()
+        self.saves_host = QWidget()
+        self.saves_col = QVBoxLayout(self.saves_host)
+        self.saves_col.setContentsMargins(18, 12, 18, 12)
+        self.saves_col.setSpacing(8)
+        grp.add_row(self.saves_host)
+        lay.addWidget(grp, 1)
+
+        foot = QHBoxLayout()
+        self.export_btn = QPushButton(self.m.t('androidSaves.export'))
+        self.export_btn.setObjectName('ghost')
+        self.export_btn.clicked.connect(self._export)
+        foot.addWidget(self.export_btn)
+        self.import_btn = QPushButton(self.m.t('androidSaves.import'))
+        self.import_btn.clicked.connect(self._import)
+        foot.addWidget(self.import_btn)
+        foot.addStretch(1)
+        done_btn = QPushButton(self.m.t('free.done'))
+        done_btn.setObjectName('creamPill')
+        done_btn.clicked.connect(self.accept)
+        foot.addWidget(done_btn)
+        lay.addLayout(foot)
+
+        self._busy = False
+        self._package = ''
+        if not self.m.android_engine_path:
+            self.status_lbl.setText(self.m.t('androidEngine.none'))
+            self.refresh_btn.setEnabled(False)
+        else:
+            self.refresh_apps()
+
+    # ---- helpers
+
+    def _run(self, args: list[str], done) -> None:
+        """porter --json on a worker thread; done(document or None) runs on the dialog's thread."""
+        if self._busy:
+            return
+        eng = self.m.android_engine_path
+        if not eng:
+            self.status_lbl.setText(self.m.t('androidEngine.none'))
+            return
+        py = self.m.python_path or ('python' if pu.IS_WIN else '/usr/bin/python3')
+        self._busy = True
+        self.status_lbl.setText(self.m.t('androidSaves.busy'))
+
+        def work() -> None:
+            doc, _code = self.aport.run_json(eng, py, args, timeout=600)
+            self._busy = False
+            done(doc)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def refresh_apps(self) -> None:
+        self._run(self.aport.saves_args('apps'), self._on_apps)
+
+    def _on_apps(self, doc) -> None:
+        apps = doc if isinstance(doc, list) else []
+        self.apps_combo.blockSignals(True)
+        self.apps_combo.clear()
+        for a in apps:
+            self.apps_combo.addItem(str(a))
+        self.apps_combo.blockSignals(False)
+        if not apps:
+            self.status_lbl.setText(self.m.t('androidSaves.noApps'))
+            self._package = ''
+        else:
+            self.status_lbl.setText('')
+            self._on_app_changed(self.apps_combo.currentIndex())
+
+    def _on_app_changed(self, idx: int) -> None:
+        self._package = str(self.apps_combo.itemData(idx) or self.apps_combo.itemText(idx) or '')
+        self._refresh_rows()
+
+    def _refresh_rows(self) -> None:
+        while self.saves_col.count():
+            item = self.saves_col.takeAt(0)
+            w_old = item.widget()
+            if w_old:
+                w_old.hide()
+                w_old.deleteLater()
+        if not self._package:
+            return
+        self._run(self.aport.saves_args('list', package=self._package), self._on_rows)
+
+    def _on_rows(self, doc) -> None:
+        if isinstance(doc, dict) and doc.get('error'):
+            self.status_lbl.setText(str(doc['error']))
+            return
+        rows = doc if isinstance(doc, list) else []
+        if isinstance(doc, dict):
+            rows = doc.get('rows') or []
+        if not rows:
+            empty = QLabel(self.m.t('androidSaves.none'))
+            empty.setObjectName('muted')
+            self.saves_col.addWidget(empty)
+            return
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            when = time.strftime('%Y-%m-%d %H:%M', time.localtime(r.get('time', 0)))
+            row = QWidget()
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(0, 0, 0, 0)
+            name = QLabel(str(r.get('name', '')))
+            name.setObjectName('rowTitle')
+            rl.addWidget(name, 1)
+            meta = QLabel(f'{when} · {r.get("files", 0)} · {lib.format_bytes(int(r.get("bytes", 0) or 0))}'
+                          + ('  +' if r.get('device') else ''))
+            meta.setObjectName('mono')
+            rl.addWidget(meta)
+            self.saves_col.addWidget(row)
+
+    def _export(self) -> None:
+        if not self._package:
+            return
+        dest = QFileDialog.getExistingDirectory(self, self.m.t('androidSaves.pickExport'), str(Path.home()))
+        if not dest:
+            return
+        self._run(self.aport.saves_args('export', package=self._package, dest=dest), self._on_exported)
+
+    def _on_exported(self, doc) -> None:
+        if isinstance(doc, dict) and doc.get('error'):
+            self.status_lbl.setText(str(doc['error']))
+            return
+        folder = str((doc or {}).get('folder') or '')
+        if folder:
+            self.status_lbl.setText(self.m.t('androidSaves.exported', folder))
+            pu.reveal(str(Path(folder).parent))
+
+    def _import(self) -> None:
+        if not self._package:
+            return
+        src, _ = QFileDialog.getOpenFileName(self, self.m.t('androidSaves.pickImport'), str(Path.home()),
+                                             'Save (*.zip)')
+        if not src:
+            src = QFileDialog.getExistingDirectory(self, self.m.t('androidSaves.pickImport'), str(Path.home()))
+        if not src:
+            return
+        self._run(self.aport.saves_args('import', package=self._package, src=src), self._on_imported)
+
+    def _on_imported(self, doc) -> None:
+        if isinstance(doc, dict) and doc.get('error'):
+            self.status_lbl.setText(str(doc['error']))
+            return
+        self.status_lbl.setText(self.m.t('androidSaves.imported'))
+        self._refresh_rows()

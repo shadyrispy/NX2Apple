@@ -137,6 +137,41 @@ class AndroidTargetTests(unittest.TestCase):
             combo.setCurrentIndex(i)
             self.assertEqual(m.android_language, str(combo.itemData(i) or ''))
 
+    def test_install_pack_button_follows_the_data_pack(self) -> None:
+        import tempfile
+        m, w = self._window('en')
+        w._switch_page('builds')
+        w._toggle_target()
+        w._toggle_target()   # android
+        self.app.processEvents()
+        self.assertTrue(w.android_install_pack_btn.isHidden())
+        with tempfile.TemporaryDirectory() as d:
+            m.android_data_path = d   # a data pack folder exists
+            w._refresh_android_card()
+            self.assertFalse(w.android_install_pack_btn.isHidden())
+            m.android_data_path = str(Path(d, 'gone'))
+            w._refresh_android_card()
+            self.assertTrue(w.android_install_pack_btn.isHidden())
+
+    def test_saves_dialog_without_an_engine_says_so(self) -> None:
+        from PySide6.QtCore import Qt
+        from nspb_qt.i18n import Lang
+        from nspb_qt.sheets import AndroidSavesDialog
+
+        for lang in Lang.all():
+            m, w = self._window(lang.code)
+            m.lang = Lang(lang.code)
+            dlg = AndroidSavesDialog(m, parent=w)
+            self.addCleanup(dlg.deleteLater)
+            self.app.processEvents()
+            self.assertFalse(dlg.refresh_btn.isEnabled())   # no engine: fetch it first
+            self.assertNotEqual(dlg.status_lbl.text(), '')
+            self.assertFalse(dlg.status_lbl.text().startswith('androidSaves.'),
+                             f'{lang.code}: the saves dialog shows a raw key')
+            dlg.close()
+            self.app.sendPostedEvents(None, Qt.DeferredDelete)
+            self.app.processEvents()
+
     def test_android_dep_rows_replace_ios_ones(self) -> None:
         from nspb_qt.model import Model
 

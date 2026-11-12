@@ -1223,8 +1223,39 @@ class MainWindow(QMainWindow):
         self.android_dev_refresh_btn.clicked.connect(self.m.android_list_devices)
         rd_lay.addWidget(self.android_dev_refresh_btn)
         grp.add_row(r_dev)
+        grp.add_divider()
+
+        # Install a built pack on the device, and the saves dialog
+        r_foot = QWidget()
+        rf_lay = QHBoxLayout(r_foot)
+        rf_lay.setContentsMargins(18, 12, 18, 12)
+        rf_lay.setSpacing(12)
+        rf_lay.addWidget(_dot(style.GREEN))
+        fcol = QVBoxLayout()
+        fcol.setSpacing(2)
+        self.android_pack_lbl = QLabel(self.m.t('android.installPack'))
+        self.android_pack_lbl.setObjectName('rowTitle')
+        self.android_pack_note = QLabel(self.m.t('android.installPack.note'))
+        self.android_pack_note.setObjectName('muted')
+        self.android_pack_note.setWordWrap(True)
+        fcol.addWidget(self.android_pack_lbl)
+        fcol.addWidget(self.android_pack_note)
+        rf_lay.addLayout(fcol, 1)
+        self.android_saves_btn = QPushButton(self.m.t('androidSaves.open'))
+        self.android_saves_btn.setObjectName('ghost')
+        self.android_saves_btn.clicked.connect(self._open_android_saves)
+        rf_lay.addWidget(self.android_saves_btn)
+        self.android_install_pack_btn = QPushButton(self.m.t('android.installPackBtn'))
+        self.android_install_pack_btn.clicked.connect(self.m.android_install_pack)
+        self.android_install_pack_btn.hide()
+        rf_lay.addWidget(self.android_install_pack_btn)
+        grp.add_row(r_foot)
 
         return grp
+
+    def _open_android_saves(self) -> None:
+        from .sheets import AndroidSavesDialog
+        AndroidSavesDialog(self.m, parent=self).exec()
 
     def _android_switch_row(self, title_key: str, note_key: str, checked: bool, slot,
                             grp: CardGroup, switch_attr: str) -> None:
@@ -1286,6 +1317,13 @@ class MainWindow(QMainWindow):
         self.android_device_lbl.setText(t('android.device'))
         self.android_device_note.setText(t('android.device.note'))
         self.android_dev_refresh_btn.setText(t('android.refreshDevices'))
+        self.android_pack_lbl.setText(t('android.installPack'))
+        self.android_pack_note.setText(t('android.installPack.note'))
+        self.android_saves_btn.setText(t('androidSaves.open'))
+        self.android_install_pack_btn.setText(t('android.installPackBtn'))
+        self.android_install_pack_btn.setVisible(bool(self.m.android_data_path)
+                                                 and Path(self.m.android_data_path).is_dir())
+        self.android_install_pack_btn.setEnabled(not self.m.running)
         combo = self.android_device_combo
         prev = self.m.android_device
         combo.blockSignals(True)

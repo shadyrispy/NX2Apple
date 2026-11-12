@@ -85,10 +85,12 @@ Windows iOS shim, so it gives Windows a second, independent build route. Selecti
 - **Game check**: selecting Android also runs `porter inspect` on the chosen files; the target
   row then says which game the folder holds and whether an Android profile covers it (playable,
   work in progress, boots, experimental, or iOS-only).
+- **Install and saves**: after a build, **Install** puts the data pack and APK on the connected
+  device (`porter install --progress json`, shown as stages like a build); **Saves…** opens a
+  dialog over `porter saves` — the installed games, their save folders, an export to a folder
+  here, an import of a folder or a .zip.
 
-The device installs and saves (export/import) still run through porter's CLI (`porter install`,
-`porter saves`); the window's buttons for them are the next step. The Android engine, its
-toolchain and a port need about 30 GB of free disk.
+The Android engine, its toolchain and a port need about 30 GB of free disk.
 
 ## What is not there yet
 

@@ -690,6 +690,76 @@ class Model(QObject):
 
         threading.Thread(target=work, daemon=True).start()
 
+    def android_install_pack(self) -> None:
+        """Put a built data pack (`<App>-data`) and its APK on the connected device
+        (`porter install --progress json`). The stages card and the log show the run, exactly
+        as for a build; cancel kills the tree the same way."""
+        if self.running:
+            return
+        eng = self.android_engine_path
+        if not eng:
+            self.finished.emit(False, self.t('android.fetchFailed'))
+            return
+        data = self.android_data_path
+        if not data or not Path(data).is_dir():
+            self.finished.emit(False, self.t('android.noDataPack'))
+            return
+        apk = self.apk_path if self.apk_path and Path(self.apk_path).is_file() else ''
+        py = self.python_path or ('python' if pu.IS_WIN else '/usr/bin/python3')
+        args = ['-m', 'porter', *aport.install_args(data, apk=apk, device=self.android_device)]
+        self._android_run = aport.RunView()
+        self._build_cancelled = False
+        self.running = True
+        self.runningChanged.emit(True)
+        with self._ensure_pso_lock():
+            self.stages = []
+        self.log_tail = ''
+        self._last_error = ''
+        self.failure = None
+        self.stagesChanged.emit()
+        self.log(self.t('msg.running', py + ' ' + ' '.join(args)) + '\n')
+
+        def work() -> None:
+            ok = False
+            proc: subprocess.Popen | None = None
+            try:
+                proc = subprocess.Popen([py] + args, cwd=eng,
+                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                        text=True, encoding='utf-8', errors='replace',
+                                        bufsize=1, env=pu.child_env(),
+                                        **pu.process_group_kwargs())
+                self._proc = proc
+                if getattr(self, '_build_cancelled', False):
+                    pu.kill_process_tree(proc)
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    self._on_android_line(line.rstrip('\n'))
+                proc.wait()
+                ok = proc.returncode == 0 and not getattr(self, '_build_cancelled', False)
+            except OSError as e:
+                self.log(f'{e}\n')
+            finally:
+                if proc is not None:
+                    pu.kill_process_tree(proc)
+                self._proc = None
+            if ok:
+                for st in self.stages:
+                    if st.state == 'running':
+                        st.state = 'done'
+                self.stagesChanged.emit()
+                note = self.t('android.installDone')
+            else:
+                if self.stages:
+                    self.stages[-1].state = 'failed'
+                    self.stagesChanged.emit()
+                last = self._android_run.last_error if self._android_run else ''
+                note = self.t('android.installFailed', last) if last else self.t('msg.buildFailed')
+            self.running = False
+            self.runningChanged.emit(False)
+            self.finished.emit(ok, note)
+
+        threading.Thread(target=work, daemon=True).start()
+
     def _find_repo(self) -> str:
         bundled = engine.bundled_engine()
         if bundled:
